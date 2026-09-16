@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>太空大冒險 - 手機陀螺儀版</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Bungee&family=Noto+Sans+TC:wght@700&display=swap');
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #05021a;
+            font-family: 'Noto Sans TC', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #gameCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            background: #05021a;
+        }
+
+        /* 權限請求遮罩（iOS 專用） */
+        #permission-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(5, 2, 26, 0.95);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 99;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .start-btn {
+            background: linear-gradient(135deg, #ff007f, #00f0ff);
+            border: none;
+            color: white;
+            padding: 18px 36px;
+            font-size: 24px;
+            font-weight: bold;
+            border-radius: 50px;
+            box-shadow: 0 0 25px rgba(255, 0, 127, 0.8);
+            cursor: pointer;
+            margin-top: 20px;
+        }
+
+        .guide-text {
+            color: #ffff00;
+            font-size: 18px;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 啟動遊戲與請求 iOS 陀螺儀權限的遮罩 -->
+    <div id="permission-overlay">
+        <div class="guide-text">🚀 <b>手機陀螺儀太空大冒險</b></div>
+        <div class="guide-text" style="color: #00f0ff; font-size: 15px;">
+            📱 左右傾斜手機：控制火箭移動<br>
+            👆 點擊螢幕任意處：發射雷射
+        </div>
+        <button class="start-btn" onclick="startGame()">點擊開始遊戲 🎮</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const overlay = document.getElementById("permission-overlay");
+
+        // 自動適應手機螢幕大小
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener("resize", resizeCanvas);
+
+        // --- 音效生成器 (Web Audio API) ---
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        let audioCtx = null;
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new AudioCtx();
+        }
+
+        function playSound(type) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+
+            if (type === 'shoot') {
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(600, now);
+                osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+                gain.gain.setValueAtTime(0.2, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.1);
+                osc.start(now);
+                osc.stop(now + 0.1);
+            } else if (type === 'explosion') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(150, now);
+                osc.frequency.linearRampToValueAtTime(40, now + 0.2);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+                osc.start(now);
+                osc.stop(now + 0.2);
+            } else if (type === 'win') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(400, now);
+                osc.frequency.setValueAtTime(600, now + 0.1);
+                osc.frequency.setValueAtTime(800, now + 0.2);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.4);
+                osc.start(now);
+                osc.stop(now + 0.4);
+            } else if (type === 'gameover') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(300, now);
+                osc.frequency.linearRampToValueAtTime(80, now + 0.5);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.linearRampToValueAtTime(0.01, now + 0.5);
+                osc.start(now);
+                osc.stop(now + 0.5);
+            }
+        }
+
+        // --- 遊戲狀態變數 ---
+        let score = 0;
+        let gameOver = false;
+        let gameWon = false;
+        let tiltGamma = 0; // 陀螺儀左右傾斜角度
+
+        // 背景星空
+        const stars = Array.from({ length: 50 }, () => ({
+            x: Math.random() * window.innerWidth,
+            y: Math.random() * window.innerHeight,
+            size: Math.random() * 3 + 1,
+            color: ["#fff", "#00f0ff", "#ff007f", "#ffff00"][Math.floor(Math.random() * 4)],
+            speed: Math.random() * 0.8 + 0.3
+        }));
+
+        // 爆炸粒子
+        const particles = [];
+        function createExplosion(x, y, color) {
+            for (let i = 0; i < 12; i++) {
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 8,
+                    vy: (Math.random() - 0.5) * 8,
+                    size: Math.random() * 5 + 2,
+                    color: color,
+                    alpha: 1,
+                    life: 0.04
+                });
+            }
+        }
+
+        // 玩家 (火箭)
+        const player = {
+            width: 44,
+            height: 35,
+            x: canvas.width / 2 - 22,
+            y: canvas.height - 70,
+            speed: 0
+        };
+
+        // 子彈
+        const bullets = [];
+
+        // 外星人設定 (自適應手機寬度)
+        const alienRows = 4;
+        const alienCols = 6;
+        let alienWidth = 36;
+        let alienHeight = 28;
+        let alienPadding = 12;
+        let alienOffsetTop = 70;
+        let alienOffsetLeft = 20;
+        let alienDirection = 1;
+        let alienSpeed = 1.0;
+        let animFrame = 0;
+
+        const aliens = [];
+        const alienTypes = [
+            { color: "#ff007f", eyeColor: "#fff", points: 30 },
+            { color: "#ffaa00", eyeColor: "#000", points: 20 },
+            { color: "#00ffcc", eyeColor: "#000", points: 10 },
+            { color: "#a855f7", eyeColor: "#fff", points: 10 }
+        ];
+
+        function initAliens() {
+            aliens.length = 0;
+            // 計算讓外星人陣列置中的邊距
+            const totalWidth = alienCols * alienWidth + (alienCols - 1) * alienPadding;
+            alienOffsetLeft = Math.max(10, (canvas.width - totalWidth) / 2);
+
+            for (let r = 0; r < alienRows; r++) {
+                aliens[r] = [];
+                for (let c = 0; c < alienCols; c++) {
+                    aliens[r][c] = {
+                        x: alienOffsetLeft + c * (alienWidth + alienPadding),
+                        y: alienOffsetTop + r * (alienHeight + alienPadding),
+                        status: 1,
+                        type: r
+                    };
+                }
+            }
+        }
+
+        // --- 陀螺儀與觸控事件 ---
+
+        // iOS 陀螺儀權限請求與啟動
+        function startGame() {
+            initAudio();
+            overlay.style.display = "none";
+
+            // 請求陀螺儀權限（iOS 13+ 需要）
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                DeviceOrientationEvent.requestPermission()
+                    .then(response => {
+                        if (response === 'granted') {
+                            window.addEventListener('deviceorientation', handleOrientation);
+                        } else {
+                            alert('需要同意陀螺儀權限才能傾斜控制火箭喔！');
+                        }
+                    })
+                    .catch(console.error);
+            } else {
+                // 一般 Android 或不支援權限 API 的瀏覽器
+                window.addEventListener('deviceorientation', handleOrientation);
+            }
+        }
+
+        // 陀螺儀傾斜角度處理
+        function handleOrientation(event) {
+            // gamma 是手機左右傾斜的角度 (-90 到 90 度)
+            if (event.gamma !== null) {
+                tiltGamma = event.gamma;
+            }
+        }
+
+        // 螢幕觸控：點擊發射子彈 / 重置遊戲
+        window.addEventListener("touchstart", (e) => {
+            e.preventDefault(); // 阻止滾動預設行為
+            initAudio();
+
+            if (gameOver || gameWon) {
+                resetGame();
+            } else {
+                // 發射子彈
+                bullets.push({ x: player.x + player.width / 2, y: player.y });
+                playSound('shoot');
+            }
+        }, { passive: false });
+
+        // --- 繪製元素 ---
+
+        function drawBackground() {
+            ctx.fillStyle = "#05021a";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            stars.forEach(star => {
+                star.y += star.speed;
+                if (star.y > canvas.height) star.y = 0;
+                ctx.fillStyle = star.color;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawPlayer() {
+            const x = player.x;
+            const y = player.y;
+
+            // 火焰動畫
+            ctx.fillStyle = "#ff4500";
+            ctx.beginPath();
+            ctx.moveTo(x + 12, y + 30);
+            ctx.lineTo(x + 22, y + 42 + Math.random() * 6);
+            ctx.lineTo(x + 32, y + 30);
+            ctx.fill();
+
+            // 主機身
+            let grad = ctx.createLinearGradient(x, y, x, y + 35);
+            grad.addColorStop(0, "#00ffff");
+            grad.addColorStop(1, "#0066ff");
+            ctx.fillStyle = grad;
+
+            ctx.beginPath();
+            ctx.moveTo(x + 22, y);
+            ctx.lineTo(x + 44, y + 30);
+            ctx.lineTo(x + 35, y + 33);
+            ctx.lineTo(x + 9, y + 33);
+            ctx.lineTo(x, y + 30);
+            ctx.closePath();
+            ctx.fill();
+
+            // 駕駛艙
+            ctx.fillStyle = "#ffff00";
+            ctx.beginPath();
+            ctx.arc(x + 22, y + 15, 6, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function drawAliens() {
+            animFrame += 0.05;
+            const floatOffset = Math.sin(animFrame) * 3;
+
+            for (let r = 0; r < alienRows; r++) {
+                for (let c = 0; c < alienCols; c++) {
+                    const a = aliens[r][c];
+                    if (a.status === 1) {
+                        const type = alienTypes[a.type];
+                        const curY = a.y + floatOffset;
+
+                        ctx.fillStyle = type.color;
+                        ctx.beginPath();
+                        ctx.roundRect(a.x, curY, alienWidth, alienHeight, 8);
+                        ctx.fill();
+
+                        // 眼睛
+                        ctx.fillStyle = "#fff";
+                        ctx.beginPath();
+                        ctx.arc(a.x + 10, curY + 10, 5, 0, Math.PI * 2);
+                        ctx.arc(a.x + alienWidth - 10, curY + 10, 5, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        ctx.fillStyle = type.eyeColor;
+                        ctx.beginPath();
+                        ctx.arc(a.x + 10, curY + 10, 2.5, 0, Math.PI * 2);
+                        ctx.arc(a.x + alienWidth - 10, curY + 10, 2.5, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+        }
+
+        function drawBullets() {
+            bullets.forEach(b => {
+                let grad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + 12);
+                grad.addColorStop(0, "#fff");
+                grad.addColorStop(0.5, "#ff007f");
+                grad.addColorStop(1, "#00f0ff");
+                ctx.fillStyle = grad;
+                ctx.shadowBlur = 8;
+                ctx.shadowColor = "#ff007f";
+                ctx.fillRect(b.x - 2, b.y, 5, 12);
+                ctx.shadowBlur = 0;
+            });
+        }
+
+        function drawParticles() {
+            particles.forEach((p, index) => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.alpha -= p.life;
+
+                if (p.alpha <= 0) {
+                    particles.splice(index, 1);
+                } else {
+                    ctx.fillStyle = p.color;
+                    ctx.globalAlpha = p.alpha;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.globalAlpha = 1.0;
+                }
+            });
+        }
+
+        // --- 邏輯更新 ---
+        function update() {
+            if (gameOver || gameWon) return;
+
+            // 陀螺儀控制火箭左右移動 (簡化靈敏度計算)
+            // 手機平放傾斜角度 > 3 度時開始移動
+            if (Math.abs(tiltGamma) > 3) {
+                const moveSpeed = (tiltGamma / 4); // 根據傾斜角度調整速度
+                player.x += moveSpeed;
+            }
+
+            // 邊界限制
+            if (player.x < 5) player.x = 5;
+            if (player.x + player.width > canvas.width - 5) player.x = canvas.width - player.width - 5;
+
+            // 更新子彈
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                bullets[i].y -= 9;
+                if (bullets[i].y < 0) {
+                    bullets.splice(i, 1);
+                    continue;
+                }
+
+                // 子彈碰撞外星人
+                let b = bullets[i];
+                for (let r = 0; r < alienRows; r++) {
+                    for (let c = 0; c < alienCols; c++) {
+                        let a = aliens[r][c];
+                        if (a.status === 1 && b &&
+                            b.x > a.x && b.x < a.x + alienWidth &&
+                            b.y > a.y && b.y < a.y + alienHeight) {
+                            
+                            a.status = 0;
+                            score += alienTypes[a.type].points;
+                            createExplosion(a.x + alienWidth / 2, a.y + alienHeight / 2, alienTypes[a.type].color);
+                            playSound('explosion');
+                            bullets.splice(i, 1);
+                            b = null;
+                            break;
+                        }
+                    }
+                    if (!b) break;
+                }
+            }
+
+            // 更新外星人移動
+            let shiftDown = false;
+            let activeCount = 0;
+
+            for (let r = 0; r < alienRows; r++) {
+                for (let c = 0; c < alienCols; c++) {
+                    let a = aliens[r][c];
+                    if (a.status === 1) {
+                        activeCount++;
+                        a.x += alienSpeed * alienDirection;
+
+                        if (a.x + alienWidth >= canvas.width - 10 || a.x <= 10) {
+                            shiftDown = true;
+                        }
+
+                        if (a.y + alienHeight >= player.y) {
+                            gameOver = true;
+                            playSound('gameover');
+                        }
+                    }
+                }
+            }
+
+            if (activeCount === 0) {
+                gameWon = true;
+                playSound('win');
+            }
+
+            if (shiftDown) {
+                alienDirection *= -1;
+                for (let r = 0; r < alienRows; r++) {
+                    for (let c = 0; c < alienCols; c++) {
+                        aliens[r][c].y += 14;
+                    }
+                }
+            }
+        }
+
+        // --- 繪製 UI ---
+        function drawUI() {
+            ctx.fillStyle = "#fff";
+            ctx.font = "bold 20px 'Noto Sans TC'";
+            ctx.fillText(`⭐ 得分: ${score}`, 20, 40);
+
+            if (gameOver) {
+                ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.fillStyle = "#ff0055";
+                ctx.font = "bold 32px 'Noto Sans TC'";
+                ctx.textAlign = "center";
+                ctx.fillText("💥 被入侵者撞毀了！", canvas.width / 2, canvas.height / 2 - 20);
+
+                ctx.fillStyle = "#fff";
+                ctx.font = "18px 'Noto Sans TC'";
+                ctx.fillText("👉 點擊螢幕重新開始 👈", canvas.width / 2, canvas.height / 2 + 30);
+                ctx.textAlign = "start";
+            } else if (gameWon) {
+                ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.fillStyle = "#00ffcc";
+                ctx.font = "bold 32px 'Noto Sans TC'";
+                ctx.textAlign = "center";
+                ctx.fillText("🎉 成功保衛地球！", canvas.width / 2, canvas.height / 2 - 20);
+
+                ctx.fillStyle = "#ffff00";
+                ctx.font = "18px 'Noto Sans TC'";
+                ctx.fillText(`總分: ${score} 分！點擊螢幕再玩一次`, canvas.width / 2, canvas.height / 2 + 30);
+                ctx.textAlign = "start";
+            }
+        }
+
+        function resetGame() {
+            score = 0;
+            gameOver = false;
+            gameWon = false;
+            bullets.length = 0;
+            particles.length = 0;
+            player.x = canvas.width / 2 - 22;
+            player.y = canvas.height - 70;
+            alienDirection = 1;
+            initAliens();
+        }
+
+        // 主循環
+        function loop() {
+            drawBackground();
+            update();
+            drawAliens();
+            drawBullets();
+            drawPlayer();
+            drawParticles();
+            drawUI();
+            requestAnimationFrame(loop);
+        }
+
+        // 啟動
+        initAliens();
+        loop();
+    </script>
+</body>
+</html>
